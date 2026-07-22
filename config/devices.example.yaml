@@ -1,0 +1,37 @@
+backends:
+  ssh-terminal:
+    connect_timeout_seconds: 15
+    default_quiet_timeout_ms: 1000
+    default_deadline_ms: 15000
+    default_response_limit_bytes: 200000
+    max_sessions: 10
+    session_idle_ttl_seconds: 600
+    max_session_lifetime_seconds: 3600
+  ssh-exec:
+    connect_timeout_seconds: 15
+    default_command_timeout_seconds: 60
+
+accounts:
+  password-operator:
+    username: netadmin
+    password: plaintext-password
+
+  key-operator:
+    username: root
+    private_key: |
+      -----BEGIN OPENSSH PRIVATE KEY-----
+      ...
+      -----END OPENSSH PRIVATE KEY-----
+
+devices:
+  example-huawei:
+    type: ssh-terminal
+    host: 192.0.2.10
+    port: 22
+    account: password-operator
+
+  example-openwrt:
+    type: ssh-exec
+    host: 192.0.2.20
+    port: 22
+    account: key-operator

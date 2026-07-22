@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "network-operator-mcp"
+version = "0.1.0"
+description = "An MCP server for operating network devices through multiple backends"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "asyncssh>=2.21,<3",
+  "mcp>=1.20,<2",
+  "pyyaml>=6,<7",
+]
+
+[project.scripts]
+network-operator-mcp = "network_operator_mcp.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/network_operator_mcp"]
