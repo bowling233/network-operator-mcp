@@ -4,9 +4,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import FastMCP
 
 from .config import AppConfig, DeviceInfo
+from .http_backend import HTTPBackendManager, HTTPMethod, HTTPResponseResult
 from .ssh_terminal import (
     ExchangeResult,
     InputType,
@@ -27,6 +28,10 @@ The server does not parse terminal prompts or infer command success.
 ssh-exec devices use a standard SSH exec channel. Use ssh_execute for one command
 and inspect stdout, stderr, exit_status, and exit_signal. Start with read-only
 commands.
+
+HTTP devices expose their WebUI APIs through http_request. Authentication is
+managed by this server. Pass only a device-relative path; start with GET and
+other read-only requests while discovering an API.
 """.strip()
 
 
@@ -39,7 +44,7 @@ class OpenSessionResult:
 @dataclass(frozen=True)
 class CloseSessionResult:
     closed: bool
-    session_id: str
+    device: str
 
 
 def create_server(
@@ -51,6 +56,7 @@ def create_server(
     json_response: bool = False,
 ) -> tuple[FastMCP, SSHTerminalManager]:
     manager = SSHTerminalManager(config)
+    http_manager = HTTPBackendManager(config)
 
     @asynccontextmanager
     async def lifespan(_: FastMCP[Any]) -> AsyncIterator[None]:
@@ -58,6 +64,7 @@ def create_server(
             yield
         finally:
             await manager.close_all()
+            await http_manager.close_all()
 
     mcp = FastMCP(
         "network-operator-mcp",
@@ -67,6 +74,7 @@ def create_server(
         port=port,
         streamable_http_path=http_path,
         json_response=json_response,
+        stateless_http=True,
     )
 
     @mcp.tool()
@@ -91,17 +99,46 @@ def create_server(
         )
 
     @mcp.tool()
+    async def http_request(
+        device: str,
+        method: HTTPMethod,
+        path: str,
+        query: dict[str, str | list[str]] | None = None,
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+        body_base64: str | None = None,
+        form: dict[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> HTTPResponseResult:
+        """Send an authenticated request to one HTTP device.
+
+        The path must be relative to the selected device, beginning with `/`.
+        Cookies, authorization data, and vendor session tokens are managed by
+        the server. Supply at most one of body, body_base64, and form. Binary
+        responses are returned with body_encoding set to base64.
+        """
+        return await http_manager.request(
+            device,
+            method,
+            path,
+            query=query,
+            headers=headers,
+            body=body,
+            body_base64=body_base64,
+            form=form,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @mcp.tool()
     async def open_session(
         device: str,
-        ctx: Context,
         quiet_timeout_ms: int | None = None,
         deadline_ms: int | None = None,
         response_limit_bytes: int | None = None,
     ) -> OpenSessionResult:
-        """Open an owned SSH session; return initial output and SSH server identity."""
+        """Open or reuse a device's SSH terminal and return its initial output."""
         session, initial = await manager.open(
             device,
-            ctx.session,
             quiet_timeout_ms=quiet_timeout_ms,
             deadline_ms=deadline_ms,
             response_limit_bytes=response_limit_bytes,
@@ -109,17 +146,16 @@ def create_server(
         return OpenSessionResult(session=session.public_info(), initial_output=initial)
 
     @mcp.tool()
-    async def list_sessions(ctx: Context) -> list[SessionInfo]:
-        """List sessions owned by this MCP client."""
-        return await manager.list(ctx.session)
+    async def list_sessions() -> list[SessionInfo]:
+        """List open SSH terminals by device."""
+        return await manager.list()
 
     @mcp.tool()
     async def exchange(
-        session_id: str,
+        device: str,
         request_id: str,
         data: str,
         cursor: int,
-        ctx: Context,
         input_type: InputType = "line",
         expected_outbound_seq: int | None = None,
         force_write: bool = False,
@@ -135,7 +171,7 @@ def create_server(
         input_type is line, text, or key. A deadline or response limit makes the
         session unsettled and blocks ordinary writes until more output is read.
         """
-        session = await manager.get(session_id, ctx.session)
+        session = await manager.get(device)
         return await session.exchange(
             request_id=request_id,
             data=data,
@@ -150,15 +186,14 @@ def create_server(
 
     @mcp.tool()
     async def read_session(
-        session_id: str,
+        device: str,
         cursor: int,
-        ctx: Context,
         quiet_timeout_ms: int | None = None,
         deadline_ms: int | None = None,
         response_limit_bytes: int | None = None,
     ) -> ReadResult:
         """Read session output from a byte cursor without consuming it."""
-        session = await manager.get(session_id, ctx.session)
+        session = await manager.get(device)
         return await session.read(
             cursor,
             quiet_timeout_ms=quiet_timeout_ms,
@@ -167,9 +202,9 @@ def create_server(
         )
 
     @mcp.tool()
-    async def close_session(session_id: str, ctx: Context) -> CloseSessionResult:
-        """Close and forget one SSH session."""
-        await manager.close(session_id, ctx.session)
-        return CloseSessionResult(closed=True, session_id=session_id)
+    async def close_session(device: str) -> CloseSessionResult:
+        """Close and forget one device's SSH terminal."""
+        await manager.close(device)
+        return CloseSessionResult(closed=True, device=device)
 
     return mcp, manager

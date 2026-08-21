@@ -4,7 +4,6 @@ import asyncio
 import os
 import tempfile
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -32,7 +31,6 @@ ConnectionState = Literal["open", "closed"]
 
 @dataclass(frozen=True)
 class SessionInfo:
-    session_id: str
     device: str
     connection_state: ConnectionState
     server_version: str | None
@@ -71,15 +69,11 @@ class SSHTerminalSession:
 
     def __init__(
         self,
-        session_id: str,
         device: DeviceConfig,
         config: AppConfig,
-        owner: object,
     ) -> None:
-        self.id = session_id
         self.device = device
         self.config = config
-        self.owner = owner
         self.connection: Any = None
         self.process: Any = None
         self.opened_at = time.time()
@@ -129,13 +123,15 @@ class SSHTerminalSession:
         try:
             self.connection = await asyncssh.connect(
                 self.device.host,
-                port=self.device.port,
+                port=self.device.port or 22,
                 username=account.username,
                 password=account.password,
                 client_keys=client_keys,
                 known_hosts=None,
                 config=None,
-                connect_timeout=self.config.backends.ssh_terminal.connect_timeout_seconds,
+                connect_timeout=(
+                    self.config.backends.ssh_terminal.connect_timeout_seconds
+                ),
                 keepalive_interval=15,
                 keepalive_count_max=2,
             )
@@ -151,7 +147,7 @@ class SSHTerminalSession:
             raise SessionError(f"cannot connect to {self.device.name}: {exc}") from exc
 
         self._reader_task = asyncio.create_task(
-            self._read_output(), name=f"ssh-reader-{self.id}"
+            self._read_output(), name=f"ssh-reader-{self.device.name}"
         )
 
     async def _read_output(self) -> None:
@@ -299,13 +295,14 @@ class SSHTerminalSession:
 
         async with self._write_lock:
             if not self.connected:
-                raise SessionError(f"session {self.id} is closed")
+                raise SessionError(f"terminal for {self.device.name} is closed")
             if (
                 expected_outbound_seq is not None
                 and expected_outbound_seq != self.outbound_seq
             ):
                 raise SessionError(
-                    f"outbound sequence is {self.outbound_seq}, expected {expected_outbound_seq}"
+                    f"outbound sequence is {self.outbound_seq}, "
+                    f"expected {expected_outbound_seq}"
                 )
             if self.unsettled and not force_write and not can_interrupt:
                 raise SessionError(
@@ -357,7 +354,6 @@ class SSHTerminalSession:
 
     def public_info(self) -> SessionInfo:
         return SessionInfo(
-            session_id=self.id,
             device=self.device.name,
             connection_state="open" if self.connected else "closed",
             server_version=self.server_version,
@@ -396,7 +392,6 @@ class SSHTerminalManager:
     async def open(
         self,
         device_name: str,
-        owner: object,
         *,
         quiet_timeout_ms: int | None = None,
         deadline_ms: int | None = None,
@@ -412,28 +407,37 @@ class SSHTerminalManager:
             )
 
         async with self._lock:
-            if len(self._sessions) >= self.config.backends.ssh_terminal.max_sessions:
-                raise SessionError("maximum number of SSH sessions reached")
-            occupied = next(
-                (
-                    session
-                    for session in self._sessions.values()
-                    if session.device.name == device_name
-                ),
-                None,
+            existing = self._sessions.get(device_name)
+            if existing is not None and existing.connected:
+                session = existing
+                reuse_existing = True
+                stale = None
+            else:
+                reuse_existing = False
+                stale = existing
+            if existing is not None:
+                if not reuse_existing:
+                    self._sessions.pop(device_name, None)
+            if not reuse_existing:
+                if (
+                    len(self._sessions)
+                    >= self.config.backends.ssh_terminal.max_sessions
+                ):
+                    raise SessionError("maximum number of SSH terminals reached")
+                session = SSHTerminalSession(device, self.config)
+                self._sessions[device_name] = session
+
+        if stale is not None:
+            await stale.close()
+
+        if reuse_existing:
+            initial = await session.read(
+                0,
+                quiet_timeout_ms=quiet_timeout_ms,
+                deadline_ms=deadline_ms,
+                response_limit_bytes=response_limit_bytes,
             )
-            if occupied is not None:
-                if occupied.owner is owner:
-                    raise SessionError(
-                        f"device already has a session in this MCP client: {device_name}; "
-                        f"reuse or close session {occupied.id}"
-                    )
-                raise SessionError(
-                    f"device is occupied by another MCP client: {device_name}; "
-                    "wait for its session to close"
-                )
-            session = SSHTerminalSession(str(uuid.uuid4()), device, self.config, owner)
-            self._sessions[session.id] = session
+            return session, initial
 
         try:
             await session.connect()
@@ -446,44 +450,35 @@ class SSHTerminalManager:
         except Exception:
             await session.close()
             async with self._lock:
-                self._sessions.pop(session.id, None)
+                self._sessions.pop(device_name, None)
             raise
 
         self._ensure_reaper()
         return session, initial
 
-    async def get(self, session_id: str, owner: object) -> SSHTerminalSession:
+    async def get(self, device_name: str) -> SSHTerminalSession:
         async with self._lock:
             try:
-                session = self._sessions[session_id]
+                session = self._sessions[device_name]
             except KeyError as exc:
-                raise SessionError(f"unknown session: {session_id}") from exc
-            if session.owner is not owner:
                 raise SessionError(
-                    "session is owned by another MCP client; wait for it to close"
-                )
+                    f"no open terminal for device: {device_name}; "
+                    "call open_session first"
+                ) from exc
             return session
 
-    async def list(self, owner: object) -> list[SessionInfo]:
+    async def list(self) -> list[SessionInfo]:
         async with self._lock:
-            return [
-                session.public_info()
-                for session in self._sessions.values()
-                if session.owner is owner
-            ]
+            return [session.public_info() for session in self._sessions.values()]
 
-    async def close(self, session_id: str, owner: object) -> None:
+    async def close(self, device_name: str) -> None:
         async with self._lock:
-            session = self._sessions.get(session_id)
+            session = self._sessions.get(device_name)
         if session is None:
-            raise SessionError(f"unknown session: {session_id}")
-        if session.owner is not owner:
-            raise SessionError(
-                "session is owned by another MCP client; wait for it to close"
-            )
+            raise SessionError(f"no open terminal for device: {device_name}")
         await session.close()
         async with self._lock:
-            self._sessions.pop(session_id, None)
+            self._sessions.pop(device_name, None)
 
     async def close_all(self) -> int:
         async with self._lock:
@@ -515,4 +510,4 @@ class SSHTerminalManager:
             for session in expired:
                 await session.close()
                 async with self._lock:
-                    self._sessions.pop(session.id, None)
+                    self._sessions.pop(session.device.name, None)

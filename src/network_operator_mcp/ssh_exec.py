@@ -62,7 +62,7 @@ async def execute(
     try:
         connection = await asyncssh.connect(
             device.host,
-            port=device.port,
+            port=device.port or 22,
             username=account.username,
             password=account.password,
             client_keys=client_keys,

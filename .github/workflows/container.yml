@@ -10,7 +10,6 @@ on:
       - Dockerfile
       - README.md
       - pyproject.toml
-      - uv.lock
       - src/**
       - .github/workflows/container.yml
   workflow_dispatch:

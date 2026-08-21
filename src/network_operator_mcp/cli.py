@@ -56,11 +56,9 @@ async def _probe(
     deadline_ms: int | None,
 ) -> None:
     manager = SSHTerminalManager(config)
-    owner = object()
     try:
         session, initial = await manager.open(
             device,
-            owner,
             quiet_timeout_ms=quiet_ms,
             deadline_ms=deadline_ms,
         )

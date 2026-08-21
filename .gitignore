@@ -4,5 +4,6 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 dist/
+uv.lock
 config/*.local.yaml
 config/*.local.yml

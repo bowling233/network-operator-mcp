@@ -10,6 +10,10 @@ backends:
   ssh-exec:
     connect_timeout_seconds: 15
     default_command_timeout_seconds: 60
+  http:
+    connect_timeout_seconds: 10
+    default_request_timeout_seconds: 30
+    max_response_bytes: 2000000
 
 accounts:
   password-operator:
@@ -23,6 +27,13 @@ accounts:
       ...
       -----END OPENSSH PRIVATE KEY-----
 
+  web-operator:
+    username: webadmin
+    password: plaintext-password
+
+  password-only-web-operator:
+    password: plaintext-password
+
 devices:
   example-huawei:
     type: ssh-terminal
@@ -35,3 +46,19 @@ devices:
     host: 192.0.2.20
     port: 22
     account: key-operator
+
+  example-tplink-switch:
+    type: http-tplink-switch
+    host: 192.0.2.30
+    account: web-operator
+
+  example-zte-be7200:
+    type: http-zte-be7200
+    host: 192.0.2.40
+    account: password-only-web-operator
+
+  example-mellanox-onyx:
+    type: http-mellanox-onyx
+    host: 192.0.2.50
+    account: web-operator
+    verify_tls: false

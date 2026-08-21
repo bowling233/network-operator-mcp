@@ -6,10 +6,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN uv sync --frozen --no-dev --no-editable && uv cache clean
+RUN uv sync --no-dev --no-editable && uv cache clean
 
 EXPOSE 8000
 

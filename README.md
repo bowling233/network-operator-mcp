@@ -1,30 +1,36 @@
 # Network Operator MCP
 
-`network-operator-mcp` 使得 Agent 可以访问网络设备的管理界面（例如 STelenet 等），
-同时把凭据留在 MCP 服务端。设备通过 `type` 选择交互模型，目前实现两种后端：
+`network-operator-mcp` lets an agent operate network-device management
+interfaces while keeping device credentials inside the MCP server.
 
-- `ssh-terminal`：持续存在的 SSH PTY，适合华为 VRP 等交互式网络 CLI。
-- `ssh-exec`：标准 SSH exec channel，一次调用执行一个命令，返回 stdout、stderr、
-  exit status 和 exit signal，适合 OpenWrt、MikroTik 等设备。
+The server supports these device backends:
 
-MCP 仅提供在 Agent 和设备之间传递消息的能力，不识别提示符，不解释设备输出，也不判断终端命令是否成功。
+- `ssh-terminal`: a persistent SSH PTY for interactive network CLIs.
+- `ssh-exec`: one standard SSH exec request per tool call.
+- `http-tplink-switch`: TP-Link switch WebUI APIs.
+- `http-zte-be7200`: ZTE BE7200 Pro+ WebUI APIs.
+- `http-mellanox-onyx`: Mellanox Onyx WebUI APIs.
 
-该 MCP 支持 stdio、Streamable HTTP 和 SSE 三种 transport。
+The server does not interpret commands, prompts, or API responses. It transports
+requests and responses between the agent and the selected device.
 
-已测试设备：
+## Tested devices
 
-| 厂商及型号 | 系统版本 | `ssh-terminal` | `ssh-exec` |
-|---|---|---|---|
-| Huawei S1730S-S48T4X-A1 | VRP 5.170（V200R022C00SPC500） | ✓ | — |
-| Huawei S5720-28P-LI-AC | VRP 5.170（V200R011C10SPC600） | ✓ | — |
-| Huawei S5720S-52P-LI-AC | VRP 5.170（V200R011C10SPC600） | ✓ | — |
-| Huawei FutureMatrix S6720S-S24S28X-A | VRP 5.170（V200R022C00SPC500） | ✓ | — |
-| MikroTik CCR2004-1G-12S+2XS（r3） | RouterOS 7.23.1（stable） | — | ✓ |
-| - | OpenWRT, ImmortalWrt | — | ✓ |
+| Vendor and model | Software | Backend |
+|---|---|---|
+| Huawei S1730S-S48T4X-A1 | VRP 5.170 (V200R022C00SPC500) | `ssh-terminal` |
+| Huawei S5720-28P-LI-AC | VRP 5.170 (V200R011C10SPC600) | `ssh-terminal` |
+| Huawei S5720S-52P-LI-AC | VRP 5.170 (V200R011C10SPC600) | `ssh-terminal` |
+| Huawei FutureMatrix S6720S-S24S28X-A | VRP 5.170 (V200R022C00SPC500) | `ssh-terminal` |
+| MikroTik CCR2004-1G-12S+2XS (r3) | RouterOS 7.23.1 stable | `ssh-exec` |
+| OpenWrt and ImmortalWrt devices | Various | `ssh-exec` |
+| TP-Link TL-SG2226 | 2023 WebUI | `http-tplink-switch` |
+| TP-Link TL-SG2024D | 2023 WebUI | `http-tplink-switch` |
+| TP-Link TL-SE2206 | 2024 WebUI | `http-tplink-switch` |
+| ZTE BE7200 Pro+ | V1.0.0.4B8.8000 | `http-zte-be7200` |
+| Mellanox SN2700 | Onyx 3.7.1134 | `http-mellanox-onyx` |
 
-## 配置
-
-配置分为后端参数、账户和设备三部分：
+## Configuration
 
 ```yaml
 backends:
@@ -39,110 +45,141 @@ backends:
   ssh-exec:
     connect_timeout_seconds: 15
     default_command_timeout_seconds: 60
+  http:
+    connect_timeout_seconds: 10
+    default_request_timeout_seconds: 30
+    max_response_bytes: 2000000
 
 accounts:
-  password-operator:
+  ssh-operator:
     username: netadmin
     password: plaintext-password
 
-  key-operator:
-    username: root
-    private_key: |
-      -----BEGIN OPENSSH PRIVATE KEY-----
-      ...
-      -----END OPENSSH PRIVATE KEY-----
+  web-operator:
+    username: webadmin
+    password: plaintext-password
+
+  zte-password:
+    password: plaintext-password
 
 devices:
   example-huawei:
     type: ssh-terminal
     host: 192.0.2.10
-    port: 22
-    account: password-operator
+    account: ssh-operator
 
-  example-openwrt:
-    type: ssh-exec
+  example-tplink:
+    type: http-tplink-switch
     host: 192.0.2.20
-    port: 22
-    account: key-operator
+    account: web-operator
+
+  example-zte:
+    type: http-zte-be7200
+    host: 192.0.2.30
+    account: zte-password
+
+  example-onyx:
+    type: http-mellanox-onyx
+    host: 192.0.2.40
+    account: web-operator
+    verify_tls: false
 ```
 
-账户可以被多个设备引用。账户支持 `password`、内联 `private_key` 和可选的
-`private_key_passphrase`。
+Accounts can be shared by multiple devices. SSH accounts may use `password`, an
+inline `private_key`, and an optional `private_key_passphrase`. The ZTE backend
+accepts a password-only account because that product has a fixed WebUI username.
 
-AsyncSSH 不校验服务器 Host Key。
+HTTP defaults to port 80, except for `http-mellanox-onyx`, which defaults to
+HTTPS port 443. Set `scheme`, `port`, and `verify_tls` on a device when its setup
+differs from those defaults. The complete placeholder configuration is in
+[`config/devices.example.yaml`](config/devices.example.yaml).
 
-## MCP 工具
+## MCP tools
 
-| 工具 | 设备类型 | 功能 |
+| Tool | Device backend | Purpose |
 |---|---|---|
-| `list_devices` | 全部 | 返回可用设备的名称和类型。 |
-| `ssh_execute` | `ssh-exec` | 执行一个标准 SSH exec 请求。 |
-| `open_session` | `ssh-terminal` | 打开持久终端并返回初始输出。 |
-| `list_sessions` | `ssh-terminal` | 列出当前 MCP 客户端拥有的会话。 |
-| `exchange` | `ssh-terminal` | 幂等发送一次终端输入并读取输出。 |
-| `read_session` | `ssh-terminal` | 从 byte cursor 非破坏性读取输出。 |
-| `close_session` | `ssh-terminal` | 关闭终端会话。 |
+| `list_devices` | All | List configured device names and backend types. |
+| `ssh_execute` | `ssh-exec` | Run one SSH exec request. |
+| `open_session` | `ssh-terminal` | Open or reuse a device's terminal. |
+| `list_sessions` | `ssh-terminal` | List open terminals. |
+| `exchange` | `ssh-terminal` | Write terminal input and read output. |
+| `read_session` | `ssh-terminal` | Read output from a byte cursor. |
+| `close_session` | `ssh-terminal` | Close a device's terminal. |
+| `http_request` | HTTP backends | Send an authenticated WebUI API request. |
 
-### SSH exec
+### HTTP requests
 
-`ssh_execute` 接收 `device`、`command`、可选的 `stdin` 和
-`timeout_seconds`，返回：
+`http_request` accepts a configured `device`, an HTTP `method`, and a
+device-relative `path`. Optional arguments are `query`, `headers`, `body`,
+`body_base64`, `form`, and `timeout_seconds`. Supply at most one of `body`,
+`body_base64`, and `form`.
+
+The MCP server manages credentials, cookies, and device tokens. Callers cannot
+supply credential-bearing headers, and sensitive authentication headers are not
+returned. Redirects from agent requests are returned to the agent instead of
+being followed automatically. Text responses are returned directly; binary
+responses use base64 and set `body_encoding` to `base64`.
+
+Example:
 
 ```json
 {
-  "device": "example-openwrt",
-  "server_version": "SSH-2.0-dropbear",
-  "stdout": "Linux OpenWrt ...\n",
-  "stderr": "",
-  "exit_status": 0,
-  "exit_signal": null,
-  "elapsed_ms": 80
+  "device": "example-zte",
+  "method": "POST",
+  "path": "/?_type=vueData&_tag=vuecfg_data",
+  "form": {
+    "IF_ACTION": "Get"
+  }
 }
 ```
 
-每次调用建立一个 SSH connection、发出一个 exec request、等待 EOF 和退出状态，
-然后关闭连接。这里的完成边界来自 SSH 协议，不使用 quiet timeout 或提示符判断。
+### SSH terminals
 
-### SSH terminal
+Each terminal has a background reader that appends device output to a temporary
+transcript. Carry `initial_output.next_cursor` into the first `exchange`, then
+carry each returned `next_cursor` forward. A quiet timeout means only that no new
+bytes arrived during that interval; it does not prove that a command completed.
 
-每个终端会话都有后台 Reader，把设备输出持续追加到临时 transcript。MCP 调用超时
-只结束本次等待，不停止 SSH 数据流。
+An MCP server restart necessarily closes active SSH connections and discards
+their transcripts. Call `open_session` again for the device and continue with the
+new initial cursor.
 
-终止读取的原因：
+## State
 
-- `quiet`：收到输出后，连续一段时间没有新字节；不表示命令完成。
-- `deadline`：本次等待到期，设备可能仍在运行或输出。
-- `response_limit`：达到响应大小限制，用返回的 cursor 继续读取。
-- `eof`：SSH terminal channel 已结束。
+SSH terminals are keyed by device name and are not owned by an MCP client
+session. The tools do not expose or accept a terminal session identifier.
+Streamable HTTP transport is also stateless, so restarting the MCP server does
+not leave the client holding an obsolete MCP session identifier.
 
-`deadline` 和 `response_limit` 会把会话标记为 `unsettled`。调用方应继续读取、发送
-`CTRL_C`，或者明确使用 `force_write=true`。
+## Running the server
 
-`exchange` 的 `input_type`：
+Validate a configuration:
 
-- `line`：编码文本并追加 CR。
-- `text`：只发送文本本身。
-- `key`：支持 `ENTER`、`SPACE`、`CTRL_C`、`CTRL_Z` 和 `Q`。
-
-每次写入使用新的 `request_id`；使用相同 ID 重试会返回原结果，不会重复写入。
-`expected_outbound_seq` 用来确认调用方掌握最新写入顺序。
-
-调用方必须把 `initial_output.next_cursor` 传给第一次 `exchange`，然后持续传递每次
-返回的 `next_cursor`。服务端在写入前记录 `write_cursor`，并从调用方 cursor 返回
-输出，因此 quiet 后迟到的字节不会被下一次写入跳过。
-
-```text
-opened = open_session(device)
-cursor = opened.initial_output.next_cursor
-seq = opened.session.outbound_seq
-
-r1 = exchange(session_id, request_id="1", data="screen-length 0 temporary",
-              cursor=cursor, expected_outbound_seq=seq)
-cursor = r1.next_cursor
-seq = r1.outbound_seq
+```console
+network-operator-mcp --config config/devices.local.yaml validate-config
 ```
 
-一个终端会话只属于创建它的 MCP client session。同一服务进程中，一台
-`ssh-terminal` 设备最多只有一个会话。其他客户端不能查看或接管该会话，尝试连接
-时会得到明确的“被另一 MCP 客户端占用，请等待”错误。占用一直保留到 SSH 关闭
-完成。
+Run over stdio:
+
+```console
+network-operator-mcp --config config/devices.local.yaml serve
+```
+
+Run with Streamable HTTP:
+
+```console
+network-operator-mcp --config config/devices.local.yaml serve \
+  --transport streamable-http --host 127.0.0.1 --port 8000
+```
+
+The server also supports the `sse` transport.
+
+## Security notes
+
+- Protect configuration files because they contain plaintext credentials.
+- SSH server host keys are not verified.
+- Keep TLS verification enabled when a device has a trusted certificate. Use
+  `verify_tls: false` only for devices whose WebUI certificate cannot be
+  validated.
+- Expose the MCP transport only to trusted agents and users. HTTP API calls can
+  change device configuration.
